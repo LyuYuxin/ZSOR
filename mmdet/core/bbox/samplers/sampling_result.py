@@ -1,5 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
+from mmdet.core.bbox.transforms import bbox_xyxy_to_cxcywh
 
 from mmdet.utils import util_mixins
 
@@ -25,14 +26,17 @@ class SamplingResult(util_mixins.NiceRepr):
 
     def __init__(self, pos_inds, neg_inds, bboxes, gt_bboxes, assign_result,
                  gt_flags):
+        '''
+        gt_flags:表示是否与gt对应,值为0或者1
+        '''
         self.pos_inds = pos_inds
         self.neg_inds = neg_inds
         self.pos_bboxes = bboxes[pos_inds]
         self.neg_bboxes = bboxes[neg_inds]
-        self.pos_is_gt = gt_flags[pos_inds]
-
+        self.pos_is_gt = gt_flags[pos_inds]#表示是否与gt对应,值为0或者1
+        
         self.num_gts = gt_bboxes.shape[0]
-        self.pos_assigned_gt_inds = assign_result.gt_inds[pos_inds] - 1
+        self.pos_assigned_gt_inds = assign_result.gt_inds[pos_inds] - 1 #表示对应的gt的下标， 从0开始
 
         if gt_bboxes.numel() == 0:
             # hack for index error case
@@ -46,13 +50,16 @@ class SamplingResult(util_mixins.NiceRepr):
 
         if assign_result.labels is not None:
             self.pos_gt_labels = assign_result.labels[pos_inds]
+            
+            self.unknown_idx = assign_result.unknown_idx
+            self.unknown_bboxes = bboxes[self.unknown_idx]
         else:
             self.pos_gt_labels = None
 
     @property
     def bboxes(self):
         """torch.Tensor: concatenated positive and negative boxes"""
-        return torch.cat([self.pos_bboxes, self.neg_bboxes])
+        return torch.cat([self.pos_bboxes,self.unknown_bboxes, self.neg_bboxes])
 
     def to(self, device):
         """Change the device of the data inplace.

@@ -45,8 +45,16 @@ def build_loss(cfg):
     return LOSSES.build(cfg)
 
 
-def build_detector(cfg, train_cfg=None, test_cfg=None):
-    """Build detector."""
+def build_detector(cfg, train_cfg=None, val_cfg=None, test_cfg=None):
+    """Build detector.
+    Parameters:
+    -----------
+    cfg: cfg file.
+    train_cfg: training mode cfg written outside 'model' in cfg file.
+    val_cfg: 同上。
+    test_cfg: 同上。
+    不推荐使用这三个关键字参数，train_cfg、 val_cfg、 test_cfg 都应该在cfg文件里面定义，而非外面.
+    """
     if train_cfg is not None or test_cfg is not None:
         warnings.warn(
             'train_cfg and test_cfg is deprecated, '
@@ -56,4 +64,4 @@ def build_detector(cfg, train_cfg=None, test_cfg=None):
     assert cfg.get('test_cfg') is None or test_cfg is None, \
         'test_cfg specified in both outer field and model field '
     return DETECTORS.build(
-        cfg, default_args=dict(train_cfg=train_cfg, test_cfg=test_cfg))
+        cfg, default_args=dict(train_cfg=train_cfg, val_cfg=val_cfg, test_cfg=test_cfg))

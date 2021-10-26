@@ -33,6 +33,7 @@ class AnchorFreeHead(BaseDenseHead, BBoxTestMixin):
         conv_cfg (dict): Config dict for convolution layer. Default: None.
         norm_cfg (dict): Config dict for normalization layer. Default: None.
         train_cfg (dict): Training config of anchor head.
+        val_cfg (dict): val config of anchor head. #added by Lyx.
         test_cfg (dict): Testing config of anchor head.
         init_cfg (dict or list[dict], optional): Initialization config dict.
     """  # noqa: W605
@@ -58,6 +59,7 @@ class AnchorFreeHead(BaseDenseHead, BBoxTestMixin):
                  norm_cfg=None,
                  train_cfg=None,
                  test_cfg=None,
+                 val_cfg=None,
                  init_cfg=dict(
                      type='Normal',
                      layer='Conv2d',
@@ -81,6 +83,7 @@ class AnchorFreeHead(BaseDenseHead, BBoxTestMixin):
         self.loss_bbox = build_loss(loss_bbox)
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
+        self.val_cfg = val_cfg
         self.conv_cfg = conv_cfg
         self.norm_cfg = norm_cfg
         self.fp16_enabled = False

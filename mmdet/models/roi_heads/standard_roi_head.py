@@ -1,4 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from uuid import NAMESPACE_DNS
+from mmcv.ops.nms import nms
 import torch
 
 from mmdet.core import bbox2result, bbox2roi, build_assigner, build_sampler
@@ -20,10 +22,50 @@ class StandardRoIHead(BaseRoIHead, BBoxTestMixin, MaskTestMixin):
             self.bbox_sampler = build_sampler(
                 self.train_cfg.sampler, context=self)
 
+
     def init_bbox_head(self, bbox_roi_extractor, bbox_head):
         """Initialize ``bbox_head``"""
-        self.bbox_roi_extractor = build_roi_extractor(bbox_roi_extractor)
-        self.bbox_head = build_head(bbox_head)
+        bbox_head_cfg = bbox_head
+        bbox_roi_extractor_cfg = bbox_roi_extractor
+        
+        #tag add test_cfg and train_cfg to head cfgs
+        if self.train_cfg is not None:
+            if self.train_cfg.get('bbox_head') is not None:
+                # other_cfgs = dict()
+                # for key, value in self.train_cfg['bbox_head'].items():
+                #     other_cfgs.update({key:value})
+                bbox_head_cfg.update({'other_cfg':self.train_cfg.get('bbox_head')})
+
+            if self.train_cfg.get('bbox_roi_extractor') is not None:
+                # other_cfgs = dict()
+                # for key, value in self.train_cfg['bbox_roi_extractor'].items():
+                #     other_cfgs.update({key:value})
+                bbox_roi_extractor_cfg.update({'other_cfg':self.train_cfg.get('bbox_roi_extractor')})
+
+        if self.test_cfg is not None:
+            if self.test_cfg.get('bbox_head') is not None:
+                # for key, value in self.test_cfg['bbox_head'].items():
+                #     bbox_head_cfg.update({key:value})
+                bbox_head_cfg.update({'other_cfg':self.test_cfg.get('bbox_head')})
+
+            if self.test_cfg.get('bbox_roi_extractor') is not None:
+                # for key, value in self.test_cfg['bbox_roi_extractor'].items():
+                #     bbox_roi_extractor_cfg.update({key:value})
+                bbox_roi_extractor_cfg.update({'other_cfg':self.test_cfg.get('bbox_roi_extractor')})
+
+        if self.val_cfg is not None:
+            if self.val_cfg.get('bbox_head') is not None:
+                # for key, value in self.val_cfg['bbox_head'].items():
+                #     bbox_head_cfg.update({key:value})
+                bbox_head_cfg.update({'other_cfg':self.val_cfg.get('bbox_head')})
+
+            if self.val_cfg.get('bbox_roi_extractor') is not None:
+                # for key, value in self.val_cfg['bbox_roi_extractor'].items():
+                #     bbox_roi_extractor_cfg.update({key:value})
+                bbox_roi_extractor_cfg.update({'other_cfg':self.val_cfg.get('bbox_roi_extractor')})
+
+        self.bbox_roi_extractor = build_roi_extractor(bbox_roi_extractor_cfg)
+        self.bbox_head = build_head(bbox_head_cfg)
 
     def init_mask_head(self, mask_roi_extractor, mask_head):
         """Initialize ``mask_head``"""
@@ -87,9 +129,8 @@ class StandardRoIHead(BaseRoIHead, BBoxTestMixin, MaskTestMixin):
                 gt_bboxes_ignore = [None for _ in range(num_imgs)]
             sampling_results = []
             for i in range(num_imgs):
-                assign_result = self.bbox_assigner.assign(
-                    proposal_list[i], gt_bboxes[i], gt_bboxes_ignore[i],
-                    gt_labels[i])
+                assign_result = self.bbox_assigner.unknown_aware_assign(
+                    proposal_list[i], gt_bboxes[i], gt_bboxes_ignore[i], gt_labels[i])
                 sampling_result = self.bbox_sampler.sample(
                     assign_result,
                     proposal_list[i],
@@ -122,25 +163,40 @@ class StandardRoIHead(BaseRoIHead, BBoxTestMixin, MaskTestMixin):
             x[:self.bbox_roi_extractor.num_inputs], rois)
         if self.with_shared_head:
             bbox_feats = self.shared_head(bbox_feats)
-        cls_score, bbox_pred = self.bbox_head(bbox_feats)
+        cls_score, bbox_pred = self.bbox_head(bbox_feats) # tag
 
         bbox_results = dict(
             cls_score=cls_score, bbox_pred=bbox_pred, bbox_feats=bbox_feats)
-        return bbox_results
-
+        return bbox_results  #
+    
     def _bbox_forward_train(self, x, sampling_results, gt_bboxes, gt_labels,
                             img_metas):
         """Run forward function and calculate loss for box head in training."""
-        rois = bbox2roi([res.bboxes for res in sampling_results])
-        bbox_results = self._bbox_forward(x, rois)
-
+        rois = bbox2roi([res.bboxes for res in sampling_results])# pos and neg proposal nums * 5(xywh+img_id)
+        bbox_results = self._bbox_forward(x, rois) # tag  
+        #tag 改进点：unknown的二次回归问题，baseline设为无回归
         bbox_targets = self.bbox_head.get_targets(sampling_results, gt_bboxes,
                                                   gt_labels, self.train_cfg)
-        loss_bbox = self.bbox_head.loss(bbox_results['cls_score'],
-                                        bbox_results['bbox_pred'], rois,
-                                        *bbox_targets)
-
+                
+        self.iter_num += 1
+        if self.iter_num < self.begin_clustering_iter:
+            loss_bbox = self.bbox_head.loss(bbox_results['cls_score'],
+                                            bbox_results['bbox_pred'], rois,
+                                            *bbox_targets, enable_clustering_loss=False)
+        else:
+            if self.iter_num % self.update_every == 0:
+                update = True
+            else:
+                update = False
+            loss_bbox = self.bbox_head.loss(bbox_results['cls_score'],
+                                            bbox_results['bbox_pred'], rois,
+                                            *bbox_targets, enable_clustering_loss=True, update=update)
+        
         bbox_results.update(loss_bbox=loss_bbox)
+    
+        self.bbox_head.update_feats_bank(bbox_targets[0].detach())
+
+
         return bbox_results
 
     def _mask_forward_train(self, x, sampling_results, bbox_feats, gt_masks,
@@ -251,7 +307,7 @@ class StandardRoIHead(BaseRoIHead, BBoxTestMixin, MaskTestMixin):
         assert self.with_bbox, 'Bbox head must be implemented.'
 
         det_bboxes, det_labels = self.simple_test_bboxes(
-            x, img_metas, proposal_list, self.test_cfg, rescale=rescale)
+            x, img_metas, proposal_list, self.val_cfg, rescale=rescale)
 
         bbox_results = [
             bbox2result(det_bboxes[i], det_labels[i],

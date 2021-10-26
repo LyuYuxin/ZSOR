@@ -47,7 +47,7 @@ class BaseDenseHead(BaseModule, metaclass=ABCMeta):
                 losses: (dict[str, Tensor]): A dictionary of loss components.
                 proposal_list (list[Tensor]): Proposals of each image.
         """
-        outs = self(x)
+        outs = self(x)#outs[0]:objectness score，多尺度维数*anchor_nums*w*h, outs[1]:多尺度维数*(anchor_nums*4)*w*h
         if gt_labels is None:
             loss_inputs = outs + (gt_bboxes, img_metas)
         else:

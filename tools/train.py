@@ -89,7 +89,6 @@ def main():
 
     cfg = Config.fromfile(args.config)
 
-
     #读取命令行参数并覆盖合并到cfg
     if args.cfg_options is not None:
         cfg.merge_from_dict(args.cfg_options)
@@ -159,10 +158,11 @@ def main():
     meta['seed'] = args.seed
     meta['exp_name'] = osp.basename(args.config)
 
-    model = build_detector(
-        cfg.model,
-        train_cfg=cfg.get('train_cfg'),
-        test_cfg=cfg.get('test_cfg'))
+    #activate train_cfg, deactivate val_cfg and test_cfg
+    cfg.model.test_cfg = None
+    # cfg.model.val_cfg = None
+
+    model = build_detector(cfg.model)
     model.init_weights()
 
     datasets = [build_dataset(cfg.data.train)]
@@ -178,6 +178,8 @@ def main():
             CLASSES=datasets[0].CLASSES)
     # add an attribute for visualization convenience
     model.CLASSES = datasets[0].CLASSES
+
+
     train_detector(
         model,
         datasets,

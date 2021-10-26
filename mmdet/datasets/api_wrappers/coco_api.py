@@ -7,7 +7,6 @@ import pycocotools
 from pycocotools.coco import COCO as _COCO
 from pycocotools.cocoeval import COCOeval as _COCOeval
 
-
 class COCO(_COCO):
     """This class is almost the same as official pycocotools package.
 

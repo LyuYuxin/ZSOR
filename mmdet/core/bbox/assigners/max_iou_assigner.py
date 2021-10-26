@@ -1,6 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
 
+from mmdet.core import bbox
+
 from ..builder import BBOX_ASSIGNERS
 from ..iou_calculators import build_iou_calculator
 from .assign_result import AssignResult
@@ -41,6 +43,7 @@ class MaxIoUAssigner(BaseAssigner):
     def __init__(self,
                  pos_iou_thr,
                  neg_iou_thr,
+                 unknown_top_k=None,
                  min_pos_iou=.0,
                  gt_max_assign_all=True,
                  ignore_iof_thr=-1,
@@ -51,6 +54,7 @@ class MaxIoUAssigner(BaseAssigner):
         self.pos_iou_thr = pos_iou_thr
         self.neg_iou_thr = neg_iou_thr
         self.min_pos_iou = min_pos_iou
+        self.unknown_top_k = unknown_top_k
         self.gt_max_assign_all = gt_max_assign_all
         self.ignore_iof_thr = ignore_iof_thr
         self.ignore_wrt_candidates = ignore_wrt_candidates
@@ -102,8 +106,8 @@ class MaxIoUAssigner(BaseAssigner):
                 gt_bboxes_ignore = gt_bboxes_ignore.cpu()
             if gt_labels is not None:
                 gt_labels = gt_labels.cpu()
-
-        overlaps = self.iou_calculator(gt_bboxes, bboxes)
+        
+        overlaps = self.iou_calculator(gt_bboxes, bboxes) #overlaps: gt bbox num * 所有尺度的总有效anchor数目
 
         if (self.ignore_iof_thr > 0 and gt_bboxes_ignore is not None
                 and gt_bboxes_ignore.numel() > 0 and bboxes.numel() > 0):
@@ -116,14 +120,101 @@ class MaxIoUAssigner(BaseAssigner):
                     gt_bboxes_ignore, bboxes, mode='iof')
                 ignore_max_overlaps, _ = ignore_overlaps.max(dim=0)
             overlaps[:, ignore_max_overlaps > self.ignore_iof_thr] = -1
-
+        
+        #根据修正后的proposal与gt的max iou对已知类和背景进行指派
         assign_result = self.assign_wrt_overlaps(overlaps, gt_labels)
+        
         if assign_on_cpu:
             assign_result.gt_inds = assign_result.gt_inds.to(device)
             assign_result.max_overlaps = assign_result.max_overlaps.to(device)
             if assign_result.labels is not None:
                 assign_result.labels = assign_result.labels.to(device)
         return assign_result
+
+    def unknown_aware_assign(self, bboxes, gt_bboxes, gt_bboxes_ignore=None, gt_labels=None):
+        """Assign gt to bboxes.
+
+        This method assign a gt bbox to every bbox (proposal/anchor), each bbox
+        will be assigned with -1, or a semi-positive number. -1 means negative
+        sample, semi-positive number is the index (0-based) of assigned gt.
+        The assignment is done in following steps, the order matters.
+
+        1. assign every bbox to the background
+        2. assign proposals whose iou with all gts < neg_iou_thr to 0
+        3. for each bbox, if the iou with its nearest gt >= pos_iou_thr,
+           assign it to that bbox
+        4. for each gt bbox, assign its nearest proposals (may be more than
+           one) to itself
+
+        Args:
+            bboxes (Tensor): Bounding boxes to be assigned, shape(n, 4).
+            gt_bboxes (Tensor): Groundtruth boxes, shape (k, 4).
+            gt_bboxes_ignore (Tensor, optional): Ground truth bboxes that are
+                labelled as `ignored`, e.g., crowd boxes in COCO.
+            gt_labels (Tensor, optional): Label of gt_bboxes, shape (k, ).
+
+        Returns:
+            :obj:`AssignResult`: The assign result.
+
+        Example:
+            >>> self = MaxIoUAssigner(0.5, 0.5)
+            >>> bboxes = torch.Tensor([[0, 0, 10, 10], [10, 10, 20, 20]])
+            >>> gt_bboxes = torch.Tensor([[0, 0, 10, 9]])
+            >>> assign_result = self.assign(bboxes, gt_bboxes)
+            >>> expected_gt_inds = torch.LongTensor([1, 0])
+            >>> assert torch.all(assign_result.gt_inds == expected_gt_inds)
+        """
+        assign_on_cpu = True if (self.gpu_assign_thr > 0) and (
+            gt_bboxes.shape[0] > self.gpu_assign_thr) else False
+        # compute overlap and assign gt on CPU when number of GT is large
+        if assign_on_cpu:
+            device = bboxes.device
+            bboxes = bboxes.cpu()
+            gt_bboxes = gt_bboxes.cpu()
+            if gt_bboxes_ignore is not None:
+                gt_bboxes_ignore = gt_bboxes_ignore.cpu()
+            if gt_labels is not None:
+                gt_labels = gt_labels.cpu()
+        
+        if gt_labels is not None:
+            assert self.unknown_top_k is not None, 'roi sample assigner must known unknown sample nums'
+        proposal_scores = bboxes[:, -1] # 所有proposal的objectness 分数
+        overlaps = self.iou_calculator(gt_bboxes, bboxes) #overlaps: gt bbox num * 所有尺度的总有效anchor数目
+
+        if (self.ignore_iof_thr > 0 and gt_bboxes_ignore is not None
+                and gt_bboxes_ignore.numel() > 0 and bboxes.numel() > 0):
+            if self.ignore_wrt_candidates:
+                ignore_overlaps = self.iou_calculator(
+                    bboxes, gt_bboxes_ignore, mode='iof')
+                ignore_max_overlaps, _ = ignore_overlaps.max(dim=1)
+            else:
+                ignore_overlaps = self.iou_calculator(
+                    gt_bboxes_ignore, bboxes, mode='iof')
+                ignore_max_overlaps, _ = ignore_overlaps.max(dim=0)
+            overlaps[:, ignore_max_overlaps > self.ignore_iof_thr] = -1
+        
+        #根据修正后的proposal与gt的max iou对已知类和背景进行指派
+        assign_result = self.assign_wrt_overlaps(overlaps, gt_labels)
+        
+        #根据rpn给出的objectness分数对未知类进行指派
+        #tag add 未知类
+        assigned_labels = assign_result.labels
+        background_inds = torch.nonzero(assigned_labels==-1, as_tuple=False).squeeze()
+        
+        if background_inds.numel() > 0:
+            #proposal 本来就是按分数降序的
+            topk_background_inds = background_inds[: self.unknown_top_k]#取topk
+            
+            assign_result.add_unknown(topk_background_inds)# 未知类样本在labels中的下标
+
+        if assign_on_cpu:
+            assign_result.gt_inds = assign_result.gt_inds.to(device)
+            assign_result.max_overlaps = assign_result.max_overlaps.to(device)
+            if assign_result.labels is not None:
+                assign_result.labels = assign_result.labels.to(device)
+        return assign_result
+
+   
 
     def assign_wrt_overlaps(self, overlaps, gt_labels=None):
         """Assign w.r.t. the overlaps of bboxes with gts.
@@ -200,12 +291,13 @@ class MaxIoUAssigner(BaseAssigner):
                         assigned_gt_inds[gt_argmax_overlaps[i]] = i + 1
 
         if gt_labels is not None:
-            assigned_labels = assigned_gt_inds.new_full((num_bboxes, ), -1)
+            
+            assigned_labels = assigned_gt_inds.new_full((num_bboxes, ), -1)#背景为-1，类别为0-97
             pos_inds = torch.nonzero(
                 assigned_gt_inds > 0, as_tuple=False).squeeze()
             if pos_inds.numel() > 0:
                 assigned_labels[pos_inds] = gt_labels[
-                    assigned_gt_inds[pos_inds] - 1]
+                    assigned_gt_inds[pos_inds] - 1]#给正样本赋予其对应的gt的label
         else:
             assigned_labels = None
 

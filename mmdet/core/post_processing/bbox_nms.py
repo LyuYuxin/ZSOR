@@ -40,8 +40,9 @@ def multiclass_nms(multi_bboxes,
         bboxes = multi_bboxes[:, None].expand(
             multi_scores.size(0), num_classes, 4)
 
-    scores = multi_scores[:, :-1]
+    # scores = multi_scores[:, :-1] # todo 未知类改背景
 
+    scores = torch.cat([multi_scores[:, :-2], multi_scores[:, -1][:,None]], dim=1)
     labels = torch.arange(num_classes, dtype=torch.long, device=scores.device)
     labels = labels.view(1, -1).expand_as(scores)
 

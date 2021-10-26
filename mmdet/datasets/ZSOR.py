@@ -15,12 +15,11 @@ from .pipelines import Compose
 
 
 @DATASETS.register_module()
-class ZSOR(Dataset):
-    """ZSOR dataset for detection.
+class CustomDataset(Dataset):
+    """Custom dataset for detection.
 
     The annotation format is shown as follows. The `ann` field is optional for
     testing.
-
     .. code-block:: none
 
         [
@@ -39,11 +38,11 @@ class ZSOR(Dataset):
         ]
 
     Args:
-        ann_file (str): Annotation file path.
+        anno_file (str): Annotation file path.
         pipeline (list[dict]): Processing pipeline.
         classes (str | Sequence[str], optional): Specify classes to load.
             If is None, ``cls.CLASSES`` will be used. Default: None.
-        data_root (str, optional): Data root for ``ann_file``,
+        data_root (str, optional): Data root for ``anno_file``,
             ``img_prefix``, ``seg_prefix``, ``proposal_file`` if specified.
         test_mode (bool, optional): If set True, annotation will not be loaded.
         filter_empty_gt (bool, optional): If set true, images without bounding
@@ -52,10 +51,10 @@ class ZSOR(Dataset):
             during tests.
     """
 
-    SEEN_CLASSES = 'data/class_names.txt'
+    CLASSES = './datasets/ZSOR/class_names.txt'
 
     def __init__(self,
-                 ann_file,
+                 anno_file,
                  pipeline,
                  classes=None,
                  data_root=None,
@@ -64,19 +63,19 @@ class ZSOR(Dataset):
                  proposal_file=None,
                  test_mode=False,
                  filter_empty_gt=True):
-        self.ann_file = ann_file
+        self.anno_file = anno_file
         self.data_root = data_root
         self.img_prefix = img_prefix
         self.seg_prefix = seg_prefix
         self.proposal_file = proposal_file
         self.test_mode = test_mode
         self.filter_empty_gt = filter_empty_gt
-        self.SEEN_CLASSES = self.get_classes(classes)
+        self.CLASSES = self.get_classes(classes)
 
         # join paths if data_root is specified
         if self.data_root is not None:
-            if not osp.isabs(self.ann_file):
-                self.ann_file = osp.join(self.data_root, self.ann_file)
+            if not osp.isabs(self.anno_file):
+                self.anno_file = osp.join(self.data_root, self.anno_file)
             if not (self.img_prefix is None or osp.isabs(self.img_prefix)):
                 self.img_prefix = osp.join(self.data_root, self.img_prefix)
             if not (self.seg_prefix is None or osp.isabs(self.seg_prefix)):
@@ -86,7 +85,7 @@ class ZSOR(Dataset):
                 self.proposal_file = osp.join(self.data_root,
                                               self.proposal_file)
         # load annotations (and proposals)
-        self.data_infos = self.load_annotations(self.ann_file)
+        self.data_infos = self.load_annotations(self.anno_file)
 
         if self.proposal_file is not None:
             self.proposals = self.load_proposals(self.proposal_file)
@@ -109,9 +108,9 @@ class ZSOR(Dataset):
         """Total number of samples of data."""
         return len(self.data_infos)
 
-    def load_annotations(self, ann_file):
+    def load_annotations(self, anno_file):
         """Load annotation from annotation file."""
-        return mmcv.load(ann_file)
+        return mmcv.load(anno_file)
 
     def load_proposals(self, proposal_file):
         """Load proposal from proposal file."""

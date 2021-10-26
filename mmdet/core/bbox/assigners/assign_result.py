@@ -203,3 +203,8 @@ class AssignResult(util_mixins.NiceRepr):
 
         if self.labels is not None:
             self.labels = torch.cat([gt_labels, self.labels])
+            if self.info.get('unknown_idx') is not None:
+                self.unknown_idx += len(gt_labels) #更新unknown idx
+    def add_unknown(self, un_known_idx):
+        self.unknown_idx = un_known_idx
+        self.set_extra_property('unknown_idx',self.unknown_idx)

@@ -7,7 +7,7 @@ import numpy as np
 from PIL import Image
 
 from .builder import DATASETS
-from .custom import CustomDataset
+from .ZSOR import CustomDataset
 
 
 @DATASETS.register_module()

@@ -21,6 +21,7 @@ class TwoStageDetector(BaseDetector):
                  rpn_head=None,
                  roi_head=None,
                  train_cfg=None,
+                 val_cfg=None,
                  test_cfg=None,
                  pretrained=None,
                  init_cfg=None):
@@ -34,24 +35,29 @@ class TwoStageDetector(BaseDetector):
         if neck is not None:
             self.neck = build_neck(neck)
 
+        #modified tag
         if rpn_head is not None:
             rpn_train_cfg = train_cfg.rpn if train_cfg is not None else None
+            rpn_test_cfg = test_cfg.rpn if test_cfg is not None else None
+            rpn_val_cfg = val_cfg.rpn if val_cfg is not None else None
             rpn_head_ = rpn_head.copy()
-            rpn_head_.update(train_cfg=rpn_train_cfg, test_cfg=test_cfg.rpn)
+            rpn_head_.update(train_cfg=rpn_train_cfg, test_cfg=rpn_test_cfg, val_cfg=rpn_val_cfg)
             self.rpn_head = build_head(rpn_head_)
 
         if roi_head is not None:
             # update train and test cfg here for now
             # TODO: refactor assigner & sampler
             rcnn_train_cfg = train_cfg.rcnn if train_cfg is not None else None
-            roi_head.update(train_cfg=rcnn_train_cfg)
-            roi_head.update(test_cfg=test_cfg.rcnn)
+            rcnn_test_cfg = test_cfg.rcnn if test_cfg is not None else None
+            rcnn_val_cfg = val_cfg.rcnn if val_cfg is not None else None
+
+            roi_head.update(train_cfg=rcnn_train_cfg,test_cfg=rcnn_test_cfg, val_cfg=rcnn_val_cfg)
             roi_head.pretrained = pretrained
             self.roi_head = build_head(roi_head)
 
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
-
+        self.val_cfg = val_cfg
     @property
     def with_rpn(self):
         """bool: whether the detector has RPN"""
@@ -66,7 +72,7 @@ class TwoStageDetector(BaseDetector):
         """Directly extract features from the backbone+neck."""
         x = self.backbone(img)
         if self.with_neck:
-            x = self.neck(x)
+            x = self.neck(x)#5张特征图，N*256*114*114，N*256*56*56，N*256*28*28，N*256*14,*14，N*256*7*7
         return x
 
     def forward_dummy(self, img):
@@ -131,7 +137,7 @@ class TwoStageDetector(BaseDetector):
         # RPN forward and loss
         if self.with_rpn:
             proposal_cfg = self.train_cfg.get('rpn_proposal',
-                                              self.test_cfg.rpn)
+                                              self.val_cfg.rpn)
             rpn_losses, proposal_list = self.rpn_head.forward_train(
                 x,
                 img_metas,

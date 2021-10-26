@@ -1,15 +1,18 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+from copy import Error
+from re import L
+from tensorflow.python.keras.backend import dtype
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from mmcv.runner import BaseModule, auto_fp16, force_fp32
 from torch.nn.modules.utils import _pair
-
+import numpy as np
 from mmdet.core import build_bbox_coder, multi_apply, multiclass_nms
 from mmdet.models.builder import HEADS, build_loss
 from mmdet.models.losses import accuracy
 from mmdet.models.utils import build_linear_layer
-
+from mmdet.models.utils import Store
 
 @HEADS.register_module()
 class BBoxHead(BaseModule):
@@ -35,10 +38,13 @@ class BBoxHead(BaseModule):
                  loss_cls=dict(
                      type='CrossEntropyLoss',
                      use_sigmoid=False,
-                     loss_weight=1.0),
+                     loss_weight=1.0,
+                     ),
                  loss_bbox=dict(
                      type='SmoothL1Loss', beta=1.0, loss_weight=1.0),
-                 init_cfg=None):
+                 init_cfg=None,
+                 other_cfg=None,
+                 ):
         super(BBoxHead, self).__init__(init_cfg)
         assert with_cls or with_reg
         self.with_avg_pool = with_avg_pool
@@ -53,10 +59,12 @@ class BBoxHead(BaseModule):
         self.reg_predictor_cfg = reg_predictor_cfg
         self.cls_predictor_cfg = cls_predictor_cfg
         self.fp16_enabled = False
-
+        self.other_cfg = other_cfg #其余跟训练、测试、验证有关的参数字典，需要自己手动读取
         self.bbox_coder = build_bbox_coder(bbox_coder)
         self.loss_cls = build_loss(loss_cls)
-        self.loss_bbox = build_loss(loss_bbox)
+        self.loss_bbox = build_loss(loss_bbox) 
+        # self.loss_contr = build_loss()
+
 
         in_channels = self.in_channels
         if self.with_avg_pool:
@@ -68,7 +76,9 @@ class BBoxHead(BaseModule):
             if self.custom_cls_channels:
                 cls_channels = self.loss_cls.get_cls_channels(self.num_classes)
             else:
-                cls_channels = num_classes + 1
+                cls_channels = num_classes + 2
+                # cls_channels = num_classes + 1
+
             self.fc_cls = build_linear_layer(
                 self.cls_predictor_cfg,
                 in_features=in_channels,
@@ -92,6 +102,29 @@ class BBoxHead(BaseModule):
                     dict(
                         type='Normal', std=0.001, override=dict(name='fc_reg'))
                 ]
+
+        ########## novels bank tag
+        self.isNovels = self.other_cfg.get('isNovels') if self.other_cfg is not None else None
+        if self.isNovels is not None:#testing
+            self.isNovelsDone = False
+
+            #获取novels类别数
+            self.novel_class_num = self.other_cfg.get('novel_class_num')
+            assert self.novel_class_num is not None
+            # if self.isNovels:
+            self.novel_feats_bank = Store(self.novel_class_num, 1)
+            # self.register_buffer("novels_feats_queue", torch.randn(self.novel_class_num, 1024)) # self.novel_class_num, dim
+            # self.novels_feats_queue = nn.functional.normalize(self.novels_feats_queue, p=2, dim=1)
+            # self.novels_feats_queue_ptr = 0
+        
+        else:#training and val
+            assert other_cfg is not None and other_cfg.get('memorySize') is not None
+            self.clustering_loss_margin = other_cfg.get('clustering_loss_margin') 
+            self.feats_bank_momentum = other_cfg.get('momentum')
+            self.memorySize = other_cfg.get('memorySize') #队列最大长度
+            #问题：这里是否要维护未知类的队列
+            #OWOD的论文中，是维护了的
+            self.feats_bank = Store(self.num_classes + 1, self.memorySize, self.feats_bank_momentum)
 
     @property
     def custom_cls_channels(self):
@@ -120,7 +153,7 @@ class BBoxHead(BaseModule):
         return cls_score, bbox_pred
 
     def _get_target_single(self, pos_bboxes, neg_bboxes, pos_gt_bboxes,
-                           pos_gt_labels, cfg):
+                           pos_gt_labels, unknown_idxs, cfg):
         """Calculate the ground truth for proposals in the single image
         according to the sampling results.
 
@@ -152,16 +185,19 @@ class BBoxHead(BaseModule):
                 - bbox_weights(Tensor):Regression weights for all
                   proposals, has shape (num_proposals, 4).
         """
+
+        #add unknown
         num_pos = pos_bboxes.size(0)
         num_neg = neg_bboxes.size(0)
-        num_samples = num_pos + num_neg
-
+        num_samples = num_pos + num_neg + len(unknown_idxs)
+        
         # original implementation uses new_zeros since BG are set to be 0
         # now use empty & fill because BG cat_id = num_classes,
         # FG cat_id = [0, num_classes-1]
+        # unknown id = num_class + 1
         labels = pos_bboxes.new_full((num_samples, ),
                                      self.num_classes,
-                                     dtype=torch.long)
+                                     dtype=torch.long)# By default, the returned Tensor has the same torch.dtype and torch.device as this tensor.
         label_weights = pos_bboxes.new_zeros(num_samples)
         bbox_targets = pos_bboxes.new_zeros(num_samples, 4)
         bbox_weights = pos_bboxes.new_zeros(num_samples, 4)
@@ -182,6 +218,12 @@ class BBoxHead(BaseModule):
             bbox_weights[:num_pos, :] = 1
         if num_neg > 0:
             label_weights[-num_neg:] = 1.0
+        
+        #add unknown
+        if len(unknown_idxs) > 0:
+            labels[num_pos: -num_neg] = self.num_classes + 1
+            unknown_weight = 1.0 if cfg.unknown_weight <= 0 else cfg.unknown_weight
+            label_weights[num_pos: -num_neg] = unknown_weight
 
         return labels, label_weights, bbox_targets, bbox_weights
 
@@ -237,12 +279,15 @@ class BBoxHead(BaseModule):
         neg_bboxes_list = [res.neg_bboxes for res in sampling_results]
         pos_gt_bboxes_list = [res.pos_gt_bboxes for res in sampling_results]
         pos_gt_labels_list = [res.pos_gt_labels for res in sampling_results]
+        #tag add unknown
+        unknown_idx_list = [res.unknown_idx for res in sampling_results]
         labels, label_weights, bbox_targets, bbox_weights = multi_apply(
             self._get_target_single,
             pos_bboxes_list,
             neg_bboxes_list,
             pos_gt_bboxes_list,
             pos_gt_labels_list,
+            unknown_idx_list,
             cfg=rcnn_train_cfg)
 
         if concat:
@@ -253,6 +298,7 @@ class BBoxHead(BaseModule):
         return labels, label_weights, bbox_targets, bbox_weights
 
     @force_fp32(apply_to=('cls_score', 'bbox_pred'))
+    # add clustering loss
     def loss(self,
              cls_score,
              bbox_pred,
@@ -261,7 +307,7 @@ class BBoxHead(BaseModule):
              label_weights,
              bbox_targets,
              bbox_weights,
-             reduction_override=None):
+             reduction_override=None, enable_clustering_loss=False, update=False):
         losses = dict()
         if cls_score is not None:
             avg_factor = max(torch.sum(label_weights > 0).float().item(), 1.)
@@ -309,7 +355,74 @@ class BBoxHead(BaseModule):
                     reduction_override=reduction_override)
             else:
                 losses['loss_bbox'] = bbox_pred[pos_inds].sum()
+        #clustering loss
+        if enable_clustering_loss:
+            pos_and_unknown_inds = labels != bg_class_ind
+            #问题：先把feat vectors 加入bank再算loss 还是反之？
+            #此处暂时采用了先加入bank
+            pos_and_unknown_feats = self.feat_vectors[pos_and_unknown_inds]
+            pos_and_unknown_targets = labels[pos_and_unknown_inds]
+            class_prototype = self.feats_bank.get_feats_prototype(update).detach()
+            # avg_factor = max(torch.sum((label_weights > 0)[pos_and_unknown_inds]).float().item(), 1.)
+            avg_factor = len(pos_and_unknown_inds) * 1.0
+            losses['loss_clustering'] = self.clustering_loss(pos_and_unknown_feats, pos_and_unknown_targets, class_prototype, avg_factor)
         return losses
+
+    def clustering_loss(self, feat_vectors, gt_targets, class_prototype, avg_factor=None):
+        '''
+        Parameters:
+        ------------
+        feat_vectors: bbox head分类头的特征向量。应当代表当前batch所有与gt对应的正样本
+        gt_targets: feat_vectors的标签，val从0-97， 99
+        class_prototypes: len(class_prototype) == len(feat_vectors), feats_bank所有类的类中心向量
+        '''
+        # distances = torch.empty((len(feat_vectors), len(class_prototype)), device='cuda')
+        # for idx, feat in enumerate(feat_vectors):
+        #     distances[idx] = self.distance_func(feat, class_prototype) #len(feat_vectors) * len(class_prototypes)
+        distances = self.distance_func(feat_vectors, class_prototype)
+        for i, gt_target in enumerate(gt_targets):
+            if gt_target == 99:
+                gt_target -= 1
+            tmp = distances[i][gt_target].clone()
+            distances[i] = torch.maximum(torch.tensor(0).cuda(), self.clustering_loss_margin - distances[i])
+            distances[i][gt_target] = tmp
+
+        loss = sum(sum(distances))
+
+        return loss / avg_factor if avg_factor is not None else loss
+
+    def distance_func(self, vector, prototypes):
+        '''
+        Parameters:
+        ------
+        vector: a single vector
+        prototypes: a list of vectors
+        Return :
+        a list of 欧氏距离
+        '''
+        return torch.matmul(vector, prototypes.T)
+        # return F.pairwise_distance(vector, prototypes, p=2, keepdim=False)
+
+    def update_feats_bank(self, gt_targets):
+        '''
+        gt_targets: 每个sample对应gt的标签。0-97为正样本，98为背景，99为未知类
+        '''
+        assert len(gt_targets) == len(self.feat_vectors)
+        pos_idx = torch.nonzero(gt_targets < 98).squeeze()
+        pos_vectors = self.feat_vectors[pos_idx]
+        if len(pos_idx.shape) == 0:
+            pos_idx = pos_idx[None]
+        pos_targets = gt_targets[pos_idx]
+        self.feats_bank.add(pos_vectors, pos_targets)
+
+        unknown_idx = torch.nonzero(gt_targets == 99).squeeze()
+        unknown_vectors = self.feat_vectors[unknown_idx]
+        if len(unknown_idx.shape) == 0:
+            unknown_idx = unknown_idx[None]
+        unknown_targets = torch.full(unknown_idx.shape, fill_value=98, device='cuda')# 适配feats bank 下标
+        self.feats_bank.add(unknown_vectors, unknown_targets.detach())
+
+
 
     @force_fp32(apply_to=('cls_score', 'bbox_pred'))
     def get_bboxes(self,
@@ -591,3 +704,12 @@ class BBoxHead(BaseModule):
             bboxes -= offsets
             batch_dets = torch.cat([bboxes, scores], dim=2)
             return batch_dets, labels
+
+    def cos_cls_with_novels(self, novels_feats=None, feats=None):
+        bbox_nums = feats.shape[0]
+
+        cls_score = feats.mm(novels_feats.T)
+        cls_score = F.softmax(cls_score, dim=1)
+
+        return cls_score
+

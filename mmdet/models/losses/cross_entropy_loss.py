@@ -40,7 +40,7 @@ def cross_entropy(pred,
         weight=class_weight,
         reduction='none',
         ignore_index=ignore_index)
-
+    # print(f'pred dim:{pred.shape[1]}, "label dim:{label.shape[0]}')
     # apply weights and do the reduction
     if weight is not None:
         weight = weight.float()

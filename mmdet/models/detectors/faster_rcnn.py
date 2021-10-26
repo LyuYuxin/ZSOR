@@ -12,6 +12,7 @@ class FasterRCNN(TwoStageDetector):
                  rpn_head,
                  roi_head,
                  train_cfg,
+                 val_cfg,
                  test_cfg,
                  neck=None,
                  pretrained=None,
@@ -22,6 +23,7 @@ class FasterRCNN(TwoStageDetector):
             rpn_head=rpn_head,
             roi_head=roi_head,
             train_cfg=train_cfg,
+            val_cfg=val_cfg,
             test_cfg=test_cfg,
             pretrained=pretrained,
             init_cfg=init_cfg)

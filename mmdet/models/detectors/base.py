@@ -1,7 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict
-
+from os import system
+import sys
+import ipdb
 import mmcv
 import numpy as np
 import torch
@@ -169,6 +171,10 @@ class BaseDetector(BaseModule, metaclass=ABCMeta):
             return self.onnx_export(img[0], img_metas[0])
 
         if return_loss:
+            
+            # print(kwargs)
+            # system.pause()
+            # ipdb.set_trace()
             return self.forward_train(img, img_metas, **kwargs)
         else:
             return self.forward_test(img, img_metas, **kwargs)
@@ -240,6 +246,7 @@ class BaseDetector(BaseModule, metaclass=ABCMeta):
 
         outputs = dict(
             loss=loss, log_vars=log_vars, num_samples=len(data['img_metas']))
+
 
         return outputs
 

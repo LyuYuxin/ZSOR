@@ -31,6 +31,7 @@ class AnchorHead(BaseDenseHead, BBoxTestMixin):
         loss_bbox (dict): Config of localization loss.
         train_cfg (dict): Training config of anchor head.
         test_cfg (dict): Testing config of anchor head.
+        val_cfg (dict): val config of anchor head. #added by Lyx.
         init_cfg (dict or list[dict], optional): Initialization config dict.
     """  # noqa: W605
 
@@ -57,6 +58,7 @@ class AnchorHead(BaseDenseHead, BBoxTestMixin):
                      type='SmoothL1Loss', beta=1.0 / 9.0, loss_weight=1.0),
                  train_cfg=None,
                  test_cfg=None,
+                 val_cfg=None,
                  init_cfg=dict(type='Normal', layer='Conv2d', std=0.01)):
         super(AnchorHead, self).__init__(init_cfg)
         self.in_channels = in_channels
@@ -81,6 +83,7 @@ class AnchorHead(BaseDenseHead, BBoxTestMixin):
         self.loss_bbox = build_loss(loss_bbox)
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
+        self.val_cfg = val_cfg
         if self.train_cfg:
             self.assigner = build_assigner(self.train_cfg.assigner)
             # use PseudoSampler when sampling is False
@@ -216,15 +219,15 @@ class AnchorHead(BaseDenseHead, BBoxTestMixin):
         anchors = flat_anchors[inside_flags, :]
 
         assign_result = self.assigner.assign(
-            anchors, gt_bboxes, gt_bboxes_ignore,
-            None if self.sampling else gt_labels)
-        sampling_result = self.sampler.sample(assign_result, anchors,
-                                              gt_bboxes)
+            anchors, gt_bboxes, gt_bboxes_ignore,#assign result.max_overlaps: （总anchor数）,代表每个anchor与gt的最大iou
+            None if self.sampling else gt_labels)#assign result.gt_inds：一个与总anchor数目长度相同的tensor，表示anchor对应的gt bbox下标，-1忽略，0背景，正数为对应gt bbox下标
+        sampling_result = self.sampler.sample(assign_result, anchors,#pos_inds:正样本在anchors中的下标，pos_bboxes,正样本的bbox坐标
+                                              gt_bboxes)#pos_assigned_gt_inds:正样本对应的gt在所有gt中的下标，pos_gt_bboxes,正样本对应的gt的bbox坐标
 
         num_valid_anchors = anchors.shape[0]
-        bbox_targets = torch.zeros_like(anchors)
-        bbox_weights = torch.zeros_like(anchors)
-        labels = anchors.new_full((num_valid_anchors, ),
+        bbox_targets = torch.zeros_like(anchors)#这是bbox的回归targets
+        bbox_weights = torch.zeros_like(anchors)##我们需要对所有的anchors都给出预测结果以及标签，并从所有的anchors里面，剔除掉忽略样本，只有正负样本参与计算
+        labels = anchors.new_full((num_valid_anchors, ),#二分类one-hot label,初始化为totoal_anchor数*类别数，0为前景， 1为背景
                                   self.num_classes,
                                   dtype=torch.long)
         label_weights = anchors.new_zeros(num_valid_anchors, dtype=torch.float)
@@ -233,12 +236,12 @@ class AnchorHead(BaseDenseHead, BBoxTestMixin):
         neg_inds = sampling_result.neg_inds
         if len(pos_inds) > 0:
             if not self.reg_decoded_bbox:
-                pos_bbox_targets = self.bbox_coder.encode(
+                pos_bbox_targets = self.bbox_coder.encode(#获取正样本anchor以及与之对应的gt bbox的偏移参数，作为回归器预测值标签
                     sampling_result.pos_bboxes, sampling_result.pos_gt_bboxes)
             else:
                 pos_bbox_targets = sampling_result.pos_gt_bboxes
             bbox_targets[pos_inds, :] = pos_bbox_targets
-            bbox_weights[pos_inds, :] = 1.0
+            bbox_weights[pos_inds, :] = 1.0#只有正样本的bbox loss参与计算，其余都忽略
             if gt_labels is None:
                 # Only rpn gives gt_labels as None
                 # Foreground is the first class since v2.5.0
@@ -246,7 +249,7 @@ class AnchorHead(BaseDenseHead, BBoxTestMixin):
             else:
                 labels[pos_inds] = gt_labels[
                     sampling_result.pos_assigned_gt_inds]
-            if self.train_cfg.pos_weight <= 0:
+            if self.train_cfg.pos_weight <= 0:#是否指定了正样本loss的系数，默认为1，负样本也为1
                 label_weights[pos_inds] = 1.0
             else:
                 label_weights[pos_inds] = self.train_cfg.pos_weight
@@ -351,8 +354,8 @@ class AnchorHead(BaseDenseHead, BBoxTestMixin):
         if any([labels is None for labels in all_labels]):
             return None
         # sampled anchors of all images
-        num_total_pos = sum([max(inds.numel(), 1) for inds in pos_inds_list])
-        num_total_neg = sum([max(inds.numel(), 1) for inds in neg_inds_list])
+        num_total_pos = sum([max(inds.numel(), 1) for inds in pos_inds_list])#batch的总正样本数
+        num_total_neg = sum([max(inds.numel(), 1) for inds in neg_inds_list])#batch的总负样本数
         # split targets to a list w.r.t. multiple levels
         labels_list = images_to_levels(all_labels, num_level_anchors)
         label_weights_list = images_to_levels(all_label_weights,
@@ -451,7 +454,7 @@ class AnchorHead(BaseDenseHead, BBoxTestMixin):
 
         device = cls_scores[0].device
 
-        anchor_list, valid_flag_list = self.get_anchors(
+        anchor_list, valid_flag_list = self.get_anchors(#anchor list：N*scale_level_num*total anchor nums per scale* 4
             featmap_sizes, img_metas, device=device)
         label_channels = self.cls_out_channels if self.use_sigmoid_cls else 1
         cls_reg_targets = self.get_targets(
@@ -627,7 +630,7 @@ class AnchorHead(BaseDenseHead, BBoxTestMixin):
                 each element represents the class label of the corresponding
                 box.
         """
-        cfg = self.test_cfg if cfg is None else cfg
+        cfg = self.val_cfg if cfg is None else cfg
         assert len(mlvl_cls_scores) == len(mlvl_bbox_preds) == len(
             mlvl_anchors)
         batch_size = mlvl_cls_scores[0].shape[0]

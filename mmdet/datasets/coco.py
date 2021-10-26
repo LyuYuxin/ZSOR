@@ -14,7 +14,7 @@ from terminaltables import AsciiTable
 from mmdet.core import eval_recalls
 from .api_wrappers import COCO, COCOeval
 from .builder import DATASETS
-from .custom import CustomDataset
+from .ZSOR import CustomDataset
 
 
 @DATASETS.register_module()

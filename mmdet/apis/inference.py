@@ -14,7 +14,7 @@ from mmdet.datasets.pipelines import Compose
 from mmdet.models import build_detector
 
 
-def init_detector(config, checkpoint=None, device='cuda:0', cfg_options=None):
+def init_detector(config, checkpoint=None, device='cuda:1', cfg_options=None):
     """Initialize a detector from config file.
 
     Args:
@@ -37,17 +37,19 @@ def init_detector(config, checkpoint=None, device='cuda:0', cfg_options=None):
         config.merge_from_dict(cfg_options)
     config.model.pretrained = None
     config.model.train_cfg = None
-    model = build_detector(config.model, test_cfg=config.get('test_cfg'))
+    config.model.val_cfg = None
+    model = build_detector(config.model)
     if checkpoint is not None:
         map_loc = 'cpu' if device == 'cpu' else None
         checkpoint = load_checkpoint(model, checkpoint, map_location=map_loc)
-        if 'CLASSES' in checkpoint.get('meta', {}):
-            model.CLASSES = checkpoint['meta']['CLASSES']
-        else:
-            warnings.simplefilter('once')
-            warnings.warn('Class names are not saved in the checkpoint\'s '
-                          'meta data, use COCO classes by default.')
-            model.CLASSES = get_classes('coco')
+        # if 'CLASSES' in checkpoint.get('meta', {}):
+        #     model.CLASSES = checkpoint['meta']['CLASSES']
+        # else:
+        #     warnings.simplefilter('once')
+        #     warnings.warn('Class names are not saved in the checkpoint\'s '
+        #                   'meta data, use COCO classes by default.')
+        #     model.CLASSES = get_classes('coco')
+    # model.CLASSES = 
     model.cfg = config  # save the config in the model for convenience
     model.to(device)
     model.eval()

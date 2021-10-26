@@ -5,6 +5,8 @@ from mmcv.runner import BaseModule
 
 from ..builder import build_shared_head
 
+import torch
+import torch.nn as nn
 
 class BaseRoIHead(BaseModule, metaclass=ABCMeta):
     """Base class for RoIHeads."""
@@ -17,11 +19,14 @@ class BaseRoIHead(BaseModule, metaclass=ABCMeta):
                  shared_head=None,
                  train_cfg=None,
                  test_cfg=None,
+                 val_cfg=None,
                  pretrained=None,
-                 init_cfg=None):
+                 init_cfg=None
+                 ):
         super(BaseRoIHead, self).__init__(init_cfg)
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
+        self.val_cfg = val_cfg
         if shared_head is not None:
             shared_head.pretrained = pretrained
             self.shared_head = build_shared_head(shared_head)
@@ -33,6 +38,11 @@ class BaseRoIHead(BaseModule, metaclass=ABCMeta):
             self.init_mask_head(mask_roi_extractor, mask_head)
 
         self.init_assigner_sampler()
+
+        #add unknown
+        self.begin_clustering_iter = self.train_cfg.begin_clustering_loss_iter
+        self.iter_num = 0 # +1 at every forward_train
+        self.update_every = self.train_cfg.update_every
 
     @property
     def with_bbox(self):

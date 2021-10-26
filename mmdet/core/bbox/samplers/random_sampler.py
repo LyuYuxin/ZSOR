@@ -73,10 +73,27 @@ class RandomSampler(BaseSampler):
 
     def _sample_neg(self, assign_result, num_expected, **kwargs):
         """Randomly sample some negative samples."""
-        neg_inds = torch.nonzero(assign_result.gt_inds == 0, as_tuple=False)
+        neg_inds = torch.nonzero(assign_result.gt_inds == 0, as_tuple=False) # 0 表示无gt对应的负样本， 非0值表示对应的gt的下标
+        
         if neg_inds.numel() != 0:
             neg_inds = neg_inds.squeeze(1)
         if len(neg_inds) <= num_expected:
             return neg_inds
         else:
             return self.random_choice(neg_inds, num_expected)
+
+    def _sample_neg_and_unknown(self, assign_result, num_expected, **kwargs):
+        """Randomly sample some negative samples."""
+        neg_inds = torch.nonzero(assign_result.gt_inds == 0, as_tuple=False) # 0 表示无gt对应的负样本， 非0值表示对应的gt的下标
+        assert assign_result.info.get('unknown_idx') is not None# 如果有未知类别，则先把未知类别去掉，再进行采样
+        unknown_inds = assign_result.unknown_idx
+       #先将未知样本下标取出，再从剩余的负样本中采样
+        num_expected -= len(unknown_inds)
+        neg_inds = neg_inds[len(unknown_inds):]# remove unknown from neg idns
+
+        if neg_inds.numel() != 0:
+            neg_inds = neg_inds.squeeze(1)
+        if len(neg_inds) <= num_expected:
+            return neg_inds
+        else:
+            return self.random_choice(neg_inds, num_expected), unknown_inds

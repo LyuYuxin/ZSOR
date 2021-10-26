@@ -1,7 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch.nn as nn
 from mmcv.cnn import ConvModule
-
+import torch
+from torch.nn.modules.container import T
 from mmdet.models.builder import HEADS
 from mmdet.models.utils import build_linear_layer
 from .bbox_head import BBoxHead
@@ -79,11 +80,12 @@ class ConvFCBBoxHead(BBoxHead):
 
         self.relu = nn.ReLU(inplace=True)
         # reconstruct fc_cls and fc_reg since input channels are changed
+        # need to add background class and unknown class 
         if self.with_cls:
             if self.custom_cls_channels:
                 cls_channels = self.loss_cls.get_cls_channels(self.num_classes)
             else:
-                cls_channels = self.num_classes + 1
+                cls_channels = self.num_classes + 2
             self.fc_cls = build_linear_layer(
                 self.cls_predictor_cfg,
                 in_features=self.cls_last_dim,
@@ -163,7 +165,9 @@ class ConvFCBBoxHead(BBoxHead):
 
             for fc in self.shared_fcs:
                 x = self.relu(fc(x))
+        # tag 
         # separate branches
+        # x is feature vectors， shape: batch_size * samples_per_num * feature dim\
         x_cls = x
         x_reg = x
 
@@ -175,6 +179,7 @@ class ConvFCBBoxHead(BBoxHead):
             x_cls = x_cls.flatten(1)
         for fc in self.cls_fcs:
             x_cls = self.relu(fc(x_cls))
+        
 
         for conv in self.reg_convs:
             x_reg = conv(x_reg)
@@ -185,8 +190,32 @@ class ConvFCBBoxHead(BBoxHead):
         for fc in self.reg_fcs:
             x_reg = self.relu(fc(x_reg))
 
-        cls_score = self.fc_cls(x_cls) if self.with_cls else None
+        #测试时操作：
+        #1. isNovels=True，isNovelsDone=False，将novels图片输入，传播到此得到novels向量集
+        #2. novels处理完后，isNovelsDone=True，isNovels=False，开始对测试集进行处理
+        #3. 测试集推理到此处，按照与novels集的相似度进行类别分配，得到cls score，输出novels 0 - k-1类别
+
+        #训练、验证时操作：
+        #1. 正常传播roi的feat到此处，isNovels应为None
+        #2. 使用fc层正常进行分类。
+
+        if self.isNovels is not None:#测试分支
+            if not self.isNovelsDone and self.isNovels: # novels特征入队列
+                self.novels_feats_queue[self.novels_feats_queue_ptr, :] = x_cls[0]   # note
+                self.novels_feats_queue_ptr += 1
+                if self.novels_feats_queue_ptr == self.num_classes:
+                    self.isNovels = False
+                    self.isNovelsDone = True
+            elif self.isNovelsDone:  # 比对测试集和novels的特征
+                # cls_score = self.cos_cls_with_novels(novels_feats=self.novels_feats_queue.detach(), feats=x_cls)
+                cls_score = x_cls.mm(self.novels_feats_queue.detach().T)
+                cls_score = F.softmax(cls_score, dim=1)
+        else:# train和val分支
+            self.feat_vectors = x_cls # 一个batch 的所有feat vector
+            cls_score = self.fc_cls(x_cls)  if self.with_cls else None
+
         bbox_pred = self.fc_reg(x_reg) if self.with_reg else None
+
         return cls_score, bbox_pred
 
 
@@ -204,7 +233,6 @@ class Shared2FCBBoxHead(ConvFCBBoxHead):
             fc_out_channels=fc_out_channels,
             *args,
             **kwargs)
-
 
 @HEADS.register_module()
 class Shared4Conv1FCBBoxHead(ConvFCBBoxHead):
